@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.amap-key
+.admin-password
+*.sqlite3*
+*.log
+*.pid
+*.lock
+__pycache__/
+logs/
+camera_corrections.json
+backups/
+archive/
+.osm-cache/
+.tile-cache/
+.DS_Store

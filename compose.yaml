@@ -1,0 +1,57 @@
+services:
+  web:
+    build: .
+    image: ${IMAGE:-ghcr.io/injectrl/tracert-pek:latest}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8765}:8765"
+    environment:
+      AMAP_API_KEY: ${AMAP_API_KEY:?Set AMAP_API_KEY in .env}
+      AMAP_JS_KEY: ${AMAP_JS_KEY:?Set AMAP_JS_KEY in .env}
+      AMAP_JS_SECURITY_CODE: ${AMAP_JS_SECURITY_CODE:?Set AMAP_JS_SECURITY_CODE in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+    volumes:
+      - app-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  camera-updater:
+    image: ${IMAGE:-ghcr.io/injectrl/tracert-pek:latest}
+    build: .
+    command: [python, update_scheduler.py, run]
+    init: true
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      TRACERT_CAMERA_UPDATE_INTERVAL: ${CAMERA_UPDATE_INTERVAL:-21600}
+      TRACERT_UPDATE_RETRY_INTERVAL: ${CAMERA_RETRY_INTERVAL:-300}
+    volumes:
+      - app-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 4m
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+volumes:
+  app-data:

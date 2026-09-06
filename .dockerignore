@@ -1,0 +1,11 @@
+**
+!Dockerfile
+!server.py
+!update_scheduler.py
+!update_avoid_points.py
+!container_entrypoint.py
+!controlled_area_gcj.json
+!camera_points.json
+!data_update_status.json
+!web/
+!web/**
