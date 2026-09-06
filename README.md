@@ -96,6 +96,7 @@ docker compose up -d --no-build
 导航栏显示的是摄像头数据源的实际更新时间，而不是最近一次检查时间，时间按北京时间显示。
 
 摄像头数据、已保存的修正和导航记录保存在 Docker 数据卷中，重启或更新容器不会清除。
+一个容器同时运行网页服务和摄像头更新器，随容器一起启动、停止；任一进程意外退出时，容器会自动重启。
 
 ## 日常管理
 
@@ -114,5 +115,13 @@ docker compose up -d --no-build
 ```
 
 修改 `.env` 后，也需执行 `docker compose up -d --no-build` 使新配置生效。
+
+如果使用过旧版双容器部署，先更新项目中的 `compose.yaml`，再执行以下命令，移除旧更新容器并切换为单容器（保留数据卷）：
+
+```bash
+docker compose down --remove-orphans
+docker compose pull
+docker compose up -d --no-build
+```
 
 `docker compose down` 会移除容器但保留数据；**不要添加 `-v`，除非确定要删除全部持久化数据。**

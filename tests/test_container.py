@@ -3,9 +3,11 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import signal
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -17,6 +19,39 @@ from container_entrypoint import initialize_data
 
 
 class ContainerTests(unittest.TestCase):
+    def test_supervisor_exits_when_child_exits(self):
+        commands = [[sys.executable, '-c', 'raise SystemExit(0)'],
+                    [sys.executable, '-c', 'import time; time.sleep(60)']]
+        result = subprocess.run([sys.executable, '-c',
+            f'from container_entrypoint import supervise; raise SystemExit(supervise({commands!r}, .5))'],
+            cwd=ROOT, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 1)
+
+    def test_supervisor_stops_children(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = [Path(directory) / str(i) for i in range(2)]
+            commands = [[sys.executable, '-c',
+                f'import os,time; from pathlib import Path; Path({str(path)!r}).write_text(str(os.getpid())); time.sleep(60)']
+                for path in files]
+            parent = subprocess.Popen([sys.executable, '-c',
+                f'from container_entrypoint import supervise; raise SystemExit(supervise({commands!r}, .5))'], cwd=ROOT)
+            try:
+                deadline = time.monotonic() + 5
+                while not all(path.exists() and path.stat().st_size for path in files):
+                    if time.monotonic() > deadline:
+                        self.fail('Children failed to start')
+                    time.sleep(.05)
+                pids = [int(path.read_text()) for path in files]
+                parent.send_signal(signal.SIGTERM)
+                self.assertEqual(parent.wait(timeout=5), 0)
+                for pid in pids:
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(pid, 0)
+            finally:
+                if parent.poll() is None:
+                    parent.terminate()
+                    parent.wait(timeout=5)
+
     def test_seed_does_not_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
             data = Path(directory)

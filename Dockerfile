@@ -20,4 +20,4 @@ COPY camera_points.json data_update_status.json ./seed/
 USER 10001:10001
 EXPOSE 8765
 ENTRYPOINT ["python", "container_entrypoint.py"]
-CMD ["python", "server.py"]
+CMD ["serve"]
