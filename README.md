@@ -1,134 +1,118 @@
 # TraceRT-PEK
 
-基于高德在线路网的 GCJ-02 路线规划服务。运行时不加载本地道路图或本地路由索引。
+基于高德地图的北京区域路线规划服务，支持摄像头点位避让、手动规避、位置修正和一键出区。
 
-## 坐标约定
+## 快速部署
 
-- 浏览器定位、地点搜索、地图点选、探头、手动规避点、区域边界、路线结果均为 `GCJ-02`。
-- API 不进行坐标系转换。
-
-## 区域策略
-
-- 区域内 -> 区域内：高德迭代规避导航。
-- 区域内 -> 区域外：计算到区域外安全接驳点的蓝线，剩余路程显示为绿色虚线。
-- 区域外 -> 区域外：不算路线，提示使用高德 App 配合六环外进京证。
-- 区域外 -> 区域内：以目的地执行出区搜索确定接驳点，再正向计算接驳点到目的地的蓝线；起点到接驳点显示为绿色虚线。
-- 区域外 5 公里缓冲区 -> 区域内：从实际起点直接计算完整规避路线。
-
-规避区域为六环以内加通州区。
-
-## Docker Compose 部署
-
-### 自动构建与镜像发布
-
-推送到 `main` 后，GitHub Actions 先运行测试，再构建 `linux/amd64`、`linux/arm64`
-双架构镜像并上传到 `ghcr.io/injectrl/tracert-pek`。提供 `latest`、UTC 时间戳、
-`sha-<完整提交 SHA>` 三种标签。PR 只测试和构建，不发布镜像。
-发布使用 GitHub 自动提供的 `GITHUB_TOKEN`（`packages: write`），不需要个人 PAT、
-Docker Hub 密码、高德密钥或生产环境后台密码，也不执行生产环境部署。
-
-首次发布后，在 GitHub Packages 检查该镜像是否为 Public；如果是 Private，匿名拉取会失败。
-新机器拉取已发布镜像：
+安装 Docker 和 Docker Compose 后，下载项目并创建配置文件：
 
 ```bash
-# 填写本地 .env 后执行；不在 GitHub 仓库中提交真实值。
+git clone https://github.com/InJeCTrL/TraceRT-PEK.git
+cd TraceRT-PEK
+cp .env.example .env
+chmod 600 .env
+```
+
+编辑 `.env`，填写以下配置：
+
+| 配置项 | 说明 |
+| --- | --- |
+| `AMAP_API_KEY` | 高德 Web 服务 Key，用于算路和地点搜索 |
+| `AMAP_JS_KEY` | 高德 JavaScript API Key，用于显示地图 |
+| `AMAP_JS_SECURITY_CODE` | 与 JavaScript API Key 配套的安全密钥 |
+| `ADMIN_PASSWORD` | 自行设置的后台登录密码，必填 |
+| `ADMIN_USERNAME` | 后台用户名，默认 `admin` |
+| `WEB_BIND` | 监听地址，默认 `127.0.0.1`；直接对外提供服务时改为 `0.0.0.0` |
+| `WEB_PORT` | 访问端口，默认 `8765` |
+
+密码包含特殊字符时，建议使用单引号包裹。不要公开包含真实凭据的配置文件。
+
+启动服务：
+
+```bash
 docker compose pull
 docker compose up -d --no-build
 ```
 
-更新使用相同命令。需要固定版本时，在 `.env` 设置 `IMAGE=ghcr.io/injectrl/tracert-pek:sha-...`。
-摄像头数据来自项目配置的公开数据源，镜像内不含用户手动修正或导航历史。
+本机访问 `http://127.0.0.1:8765`，后台地址为 `/admin`。
+手机、车机远程访问时，请通过反向代理或隧道配置 **HTTPS**，并允许浏览器获取位置。
 
-### 本地构建
+## 使用方法
 
-```bash
-# 仅首次配置时复制模板，不要覆盖已有 .env。
-cp .env.example .env
-chmod 600 .env
-# 编辑 .env 后执行
-docker compose config --quiet
-docker compose up -d --build
-docker compose ps
-docker compose logs -f --tail=100
-```
+### 选择起点和终点
 
-四项必填凭据为 `AMAP_API_KEY`、`AMAP_JS_KEY`、`AMAP_JS_SECURITY_CODE`、
-`ADMIN_PASSWORD`。Compose 将它们通过 `environment` 注入 Web 容器，缺失或为空时
-拒绝部署；也可直接在 `compose.yaml` 的 `environment` 中填写值，但不要提交含凭据的文件。
-密码建议在 `.env` 中用单引号包裹，特别是包含 `$`、空格或 `#` 时。
-`ADMIN_USERNAME` 默认 `admin`。环境变量在容器运行时注入，不需要重建镜像即可更换，
-修改后执行 `docker compose up -d` 重建容器，单纯 `restart` 不会加载新配置。
+- 输入地名，在搜索结果中选择具体位置后再计算路径。
+- 点按地图，可设为起点、设为终点或添加手动规避点。
+- 输入框旁的定位按钮用于填入当前位置，换向按钮用于交换起点和终点。
 
-镜像不包含 `.env`、旧密钥文件、本地修正或导航记录，构建上下文采用白名单。
-前端 JS Key 和安全码由后端运行时填入页面，仍然对浏览器可见；Web 服务 Key 和
-后台密码不会写入页面。旧 `.amap-key`、`.admin-password` 不再被程序读取，暂保留原文件。
-不要公开 `docker compose config` 或 `docker inspect` 的完整输出，它们可能包含凭据。
+### 计算路线
 
-- `web`：Web/API 服务；以非 root 用户运行，配置健康检查。
-- `camera-updater`：独立常驻更新器，无需获得 Web 容器的凭据。Web 健康后启动，
-  立即检查一次摄像头数据，然后每 6 小时检查，失败 5 分钟后重试。
-- `app-data` 卷：保存摄像头数据、数据更新时间、本地修正、SQLite 导航记录/路线缓存、错误日志。
-  首次启动从镜像初始化摄像头数据，后续部署不覆盖已有数据。
-- 标准输出日志由 Docker 限额轮转；`routing_errors.log` 在持久化卷内，需要另行归档。
+- **计算路径**：根据起点和终点所在区域规划路线。
+- **一键从起点出六环**：计算离开规避区域的路线；起点已在区域外时不可用。
+- **重置**：清除路线、终点和手动规避点，并在有定位时将起点恢复为当前位置。
 
-默认端口为 `127.0.0.1:8765`，可继续配合宿主机 Cloudflare Tunnel；此配置不迁移
-现有 Cloudflare Tunnel 凭据或进程。如需直接对外监听，可配置 `WEB_BIND=0.0.0.0`。
-定位和后台登录应通过 HTTPS 使用，容器本身只提供 HTTP，由隧道或反向代理提供 HTTPS。
-`WEB_PORT` 可修改宿主机端口，容器内部固定为 8765。
+计算完成后，提示框显示路线距离、预估行驶时间、计算次数和算路时间。
+蓝线表示本服务规划的路线；绿色直虚线仅表示待使用高德 App 继续规划的接驳方向，**不是可行驶路线**。
+需要接驳时，可在提示框中复制接驳点名称及坐标。
 
-```bash
-docker compose stop      # 停止两个容器
-docker compose start     # 启动已有容器
-docker compose down      # 删除容器，保留数据卷
-```
+### 地图与定位
 
-不要使用 `docker compose down -v`，除非确定要删除全部持久化数据。
+- **回到车位**：将当前位置移到地图中央并开启跟随。
+- **指南针**：切换正北朝上和车头朝上。
+- 缩放不退出跟随；点按、拖动或手动旋转地图会退出跟随。
+- 跟随时，接近路线中的路口会自动放大，驶离后恢复。
+- 摄像头默认隐藏，地图默认简洁模式，可用右下角开关调整。隐藏摄像头只影响显示，不影响算路避让。
+- 定位长时间未更新时会显示提示；锁屏或切换到后台可能中断定位，回到页面后会尝试恢复。
 
-### 迁移当前电脑的数据
+### 规避点与位置修正
 
-当前本地服务占用 8765。迁移前先停服务和更新器，导出一致的数据副本；导出脚本使用
-SQLite backup API，不直接拷贝可能未合并 WAL 的数据库。下面的导入仅用于首次迁移，
-不要覆盖一个已经使用中的 Docker 数据卷：
+- 手动规避点可通过点按后选择删除。
+- 摄像头坐标有偏差时，点按摄像头并选择 **修正位置**，拖动下方踏板调整点位，再点 **锁定修正**。
+- 已保存的摄像头修正不会被后续数据更新覆盖。
 
-```bash
-./service.py stop
-python3 export_data.py backups/docker-migration
-docker compose build
-docker compose run --rm --no-deps --user 0 \
-  -v "$PWD/backups/docker-migration:/import:ro" web \
-  sh -c 'cp /import/* /data/ && chown -R 10001:10001 /data'
-docker compose up -d
-```
+地图点选、手动输入及复制的坐标均按 `GCJ-02` 使用。
 
-如果构建失败或暂不迁移，可以运行 `./service.py start` 恢复原服务。
-不要让宿主机与 Docker 更新器同时操作同一个数据目录。
+## 区域策略
 
-## 本地 Python 启动
+规避区域为 **六环以内加通州全域**，区域外设有 **5 公里缓冲区**。
+
+| 起点 → 终点 | 处理方式 |
+| --- | --- |
+| 区域内 → 区域内 | 计算完整规避路线 |
+| 区域内 → 区域外 5 公里缓冲区 | 直接规避算路到终点 |
+| 区域外 5 公里缓冲区 → 区域内 | 从实际起点直接计算完整规避路线 |
+| 区域内 → 更远的区域外 | 计算到区域外接驳点的蓝线，剩余部分用绿色直虚线表示 |
+| 更远的区域外 → 区域内 | 从终点执行出区搜索选取接驳点，再计算接驳点到终点的蓝线；起点到接驳点用绿色直虚线表示 |
+| 区域外 → 区域外 | 不算路线，提示使用高德 App 配合六环外进京证 |
+
+起点或终点在二环以内（含二环）时，不进行寻路。
+跨区域行程请根据计算完成后的提示安排接驳，不要沿绿色直虚线行驶。
+
+## 后台与数据更新
+
+访问 `/admin` 并使用配置的账号密码登录，可查看算路记录、成功与否、路线详情和错误信息，也可清除记录。
+
+服务启动后会检查一次摄像头数据，之后默认每 **6 小时**检查一次，失败后每 **5 分钟**重试。
+导航栏显示的是摄像头数据源的实际更新时间，而不是最近一次检查时间，时间按北京时间显示。
+
+摄像头数据、已保存的修正和导航记录保存在 Docker 数据卷中，重启或更新容器不会清除。
+
+## 日常管理
 
 ```bash
-./service.py start
-./service.py status
-./service.py restart
-./service.py stop
+docker compose ps                    # 查看状态
+docker compose logs -f --tail=100     # 查看日志
+docker compose stop                  # 停止服务
+docker compose start                 # 启动服务
 ```
 
-本地 `service.py start` 也会读取 `.env` 中上述五项配置（已有环境变量优先），
-支持普通值及引号包裹的字面值，不执行 shell 展开。直接运行 `server.py` 则必须先导出环境变量。
-
-`service.py` 会同时管理 Web 服务和每 6 小时运行一次的摄像头数据更新器；`stop`、
-`restart` 和 `status` 也会同时操作或检查这两个进程。默认监听 `0.0.0.0:8765`，
-服务日志位于 `logs/server-service.log`，更新日志位于 `logs/update-scheduler.log`。
-摄像头数据手动更新：
+更新版本：
 
 ```bash
-python3 update_avoid_points.py
+docker compose pull
+docker compose up -d --no-build
 ```
 
-也可以单独管理摄像头更新器：
+修改 `.env` 后，也需执行 `docker compose up -d --no-build` 使新配置生效。
 
-```bash
-python3 update_scheduler.py start
-```
-
-用户对探头位置的修正单独保存在 `camera_corrections.json`。更新脚本只替换数据源文件
-`camera_points.json`，加载时再叠加本地修正，因此上游探头数据更新不会覆盖修正位置。
+`docker compose down` 会移除容器但保留数据；**不要添加 `-v`，除非确定要删除全部持久化数据。**
