@@ -43,6 +43,8 @@ let locationPollPromise = null;
 let lastLocationFixAt = 0;
 let lastLocationSourceTimestamp = 0;
 let locationFixSerial = 0;
+let pendingLocationRender = null;
+let locationConversionError = false;
 let cancelLocationPoll = null;
 let positionWatchId = null;
 let positionWatchGeneration = 0;
@@ -66,8 +68,8 @@ function recordLocationEvent(type, details = {}) {
 
 function updateLocationHealth() {
   const age = Date.now()-(lastLocationFixAt || locationStartedAt);
-  locationHealth.hidden = age < 10000;
-  locationHealth.textContent = lastLocationFixAt
+  locationHealth.hidden = age < 10000 && !locationConversionError;
+  locationHealth.textContent = locationConversionError ? '定位坐标转换暂未恢复，正在重试' : lastLocationFixAt
     ? `定位暂未更新 · ${Math.floor(age/1000)} 秒`
     : '暂未取得定位，请检查定位权限与信号';
 }
@@ -254,26 +256,44 @@ function updateJunctionZoom() {
   }
 }
 
+const locationFilter = new LocationFilter({
+  distance: distanceMeters,
+  canRun: () => !document.hidden,
+  convert: (point, done) => AMap.convertFrom(point, 'gps', (status, result) => {
+    const converted = result?.locations?.[0];
+    if (status !== 'complete' || !converted) {
+      done(new Error(result?.info || '坐标转换失败'));
+      return;
+    }
+    done(null, [Number(converted.lng ?? converted.getLng?.()), Number(converted.lat ?? converted.getLat?.())]);
+  }),
+  onFix: sample => {
+    lastLocationSourceTimestamp = sample.timestamp;
+    lastLocationFixAt = Math.min(Date.now(), sample.timestamp);
+    locationFixSerial++;
+    recordLocationEvent('fix', {sourceTimestamp: sample.timestamp, accuracy: sample.accuracy, source: 'browser'});
+    updateLocationHealth();
+  },
+  onPosition: (sample, point) => {
+    locationConversionError = false;
+    renderLocation({position: point, heading: sample.heading});
+    pendingLocationRender?.();
+  },
+  onEvent: recordLocationEvent,
+  onError: error => {
+    locationConversionError = true;
+    updateLocationHealth();
+    pendingLocationRender?.(error);
+  },
+});
+window.getLocationStats = () => ({...locationFilter.stats});
+
 function acceptLocation(result) {
-  const position = result?.position;
-  if (!position) return false;
-  const lon = Number(position.lng ?? position.getLng?.() ?? position[0]);
-  const lat = Number(position.lat ?? position.getLat?.() ?? position[1]);
-  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return false;
-  const sourceTimestamp = Number(result.timestamp ?? result.coords?.timestamp);
-  if (Number.isFinite(sourceTimestamp) && sourceTimestamp > 0 &&
-      (sourceTimestamp <= lastLocationSourceTimestamp || Date.now()-sourceTimestamp > 15000)) {
-    recordLocationEvent('stale-result', {sourceTimestamp});
-    return false;
-  }
-  if (Number.isFinite(sourceTimestamp) && sourceTimestamp > 0) {
-    lastLocationSourceTimestamp = Math.max(lastLocationSourceTimestamp, sourceTimestamp);
-  }
-  lastLocationFixAt = Number.isFinite(sourceTimestamp) && sourceTimestamp > 0
-    ? Math.min(Date.now(), sourceTimestamp) : Date.now();
-  locationFixSerial += 1;
-  recordLocationEvent('fix', {sourceTimestamp: sourceTimestamp || null,
-    accuracy: result.accuracy ?? null, source: result.location_type ?? 'unknown'});
+  return locationFilter.submit(result);
+}
+
+function renderLocation(result) {
+  const [lon, lat] = result.position;
   updateLocationHealth();
   const point = [lon, lat];
   const now = Date.now();
@@ -303,32 +323,29 @@ function acceptLocation(result) {
   }
   applyFollowView(!recenterRotationAnchor);
   updateJunctionZoom();
+  updateLocationHealth();
   return true;
 }
 
 function createGeolocation() {
-  return new AMap.Geolocation({enableHighAccuracy: true, maximumAge: 0, timeout: 10000, convert: true,
-    GeoLocationFirst: true, noIpLocate: 3, getCityWhenFail: false, needAddress: false,
-    showButton: false, showMarker: false, showCircle: false, panToLocation: false, zoomToAccuracy: false});
+  if (!navigator.geolocation) throw new Error('浏览器不支持定位，请使用 HTTPS 并允许定位');
+  const options = {enableHighAccuracy: true, maximumAge: 0, timeout: 10000};
+  const events = {};
+  return {
+    getCurrentPosition: callback => navigator.geolocation.getCurrentPosition(
+      result => callback('complete', result), error => callback('error', error), options),
+    on: (name, handler) => { events[name] = handler; },
+    off: name => { delete events[name]; },
+    watchPosition: () => navigator.geolocation.watchPosition(
+      result => events.complete?.(result), error => events.error?.(error), options),
+    clearWatch: id => navigator.geolocation.clearWatch(id),
+  };
 }
 
 function ensureGeolocation() {
   if (geolocationReady) return geolocationReady;
-  geolocationReady = new Promise((resolve, reject) => {
-    let finished = false;
-    const timer = window.setTimeout(() => {
-      finished = true;
-      reject(new Error('定位插件加载超时'));
-    }, 12000);
-    AMap.plugin('AMap.Geolocation', () => {
-      if (finished) return;
-      finished = true;
-      window.clearTimeout(timer);
-      try {
-        amapPollGeolocation = createGeolocation();
-        resolve();
-      } catch (error) { reject(error); }
-    });
+  geolocationReady = Promise.resolve().then(() => {
+    amapPollGeolocation = createGeolocation();
   }).catch(error => { geolocationReady = null; throw error; });
   return geolocationReady;
 }
@@ -344,6 +361,7 @@ async function locate() {
       if (settled) return;
       settled = true;
       window.clearTimeout(timer);
+      if (pendingLocationRender === finish) pendingLocationRender = null;
       recordLocationEvent(error ? 'poll-error' : 'poll-complete', {
         elapsedMs: Date.now()-started, message: error?.message ?? ''});
       if (error) reject(error); else resolve(currentCoord);
@@ -364,7 +382,10 @@ async function locate() {
           const sourceTimestamp = Number(result.timestamp ?? result.coords?.timestamp);
           const newerThanWatch = Number.isFinite(sourceTimestamp) && sourceTimestamp > lastLocationSourceTimestamp;
           const accepted = (locationFixSerial === serialAtStart || newerThanWatch) && acceptLocation(result);
-          finish(accepted || locationFixSerial > serialAtStart ? null : new Error('未取得新的定位结果'));
+          if (accepted || locationFixSerial > serialAtStart) {
+            if (currentCoord) finish();
+            else pendingLocationRender = finish;
+          } else finish(new Error('未取得新的定位结果'));
         } catch (error) { finish(error); }
       });
     } catch (error) { finish(error); }
@@ -443,12 +464,12 @@ async function resumePosition() {
 }
 document.addEventListener('visibilitychange', () => {
   recordLocationEvent('visibility');
-  if (document.hidden) { stopPositionWatch(); cancelLocationPoll?.(); }
+  if (document.hidden) { stopPositionWatch(); cancelLocationPoll?.(); locationFilter.suspend(); }
   else resumePosition();
 });
 window.addEventListener('pageshow', resumePosition);
 window.addEventListener('online', resumePosition);
-window.addEventListener('pagehide', () => { stopPositionWatch(); cancelLocationPoll?.(); });
+window.addEventListener('pagehide', () => { stopPositionWatch(); cancelLocationPoll?.(); locationFilter.suspend(); });
 
 function useCurrent(mode) {
   (currentCoord ? Promise.resolve(currentCoord) : locate())

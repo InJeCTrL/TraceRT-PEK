@@ -5,14 +5,16 @@ const source = fs.readFileSync('web/amap-app.js', 'utf8');
 const timers = new Map();
 const instances = [];
 let timerId = 0;
-class Geolocation {
-  constructor() { this.events = {}; instances.push(this); }
-  getCurrentPosition(callback) { this.callback = callback; }
-  on(name, fn) { this.events[name] = fn; }
-  off(name) { delete this.events[name]; }
-  watchPosition() { return 42; }
-  clearWatch(id) { this.cleared = id; }
-}
+const geolocation = {
+  getCurrentPosition(success, error) {
+    instances.push({callback: (status, result) => status === 'complete' ? success(result) : error(result)});
+  },
+  watchPosition(success) {
+    instances.push({events: {complete: success}});
+    return instances.length;
+  },
+  clearWatch(id) { instances[id-1].cleared = id; },
+};
 const context = vm.createContext({
   console, Date, Number, Math, Promise, Error,
   document: {hidden: false, addEventListener() {}},
@@ -20,7 +22,7 @@ const context = vm.createContext({
     setTimeout(fn) { const id = ++timerId; timers.set(id, fn); return id; },
     clearTimeout(id) { timers.delete(id); }, setInterval() {}, addEventListener() {},
   },
-  AMap: {Geolocation, plugin(name, callback) { callback(); }},
+  navigator: {geolocation},
 });
 vm.runInContext(`
   let geolocationReady, amapGeolocation, amapPollGeolocation, locationPollPromise;
@@ -29,6 +31,8 @@ vm.runInContext(`
   let lastWatchStartedAt = 0, lastWatchFixAt = 0;
   let locationFixSerial = 0, lastLocationSourceTimestamp = 0, lastLocationFixAt = 0;
   let currentCoord = null;
+  let pendingLocationRender = null;
+  const locationFilter = {suspend() {}};
   function recordLocationEvent() {}
   function updateLocationHealth() {}
   function acceptLocation(result) {
@@ -61,7 +65,7 @@ const tick = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); 
   const oldWatch = instances.at(-1);
   const oldCallback = oldWatch.events.complete;
   await run('startPositionWatch()');
-  assert.equal(oldWatch.cleared, 42);
+  assert.equal(oldWatch.cleared, instances.indexOf(oldWatch)+1);
   const serial = run('locationFixSerial');
   oldCallback({position: [8, 9]});
   assert.equal(run('locationFixSerial'), serial, 'ignore obsolete watch');
@@ -73,13 +77,13 @@ const tick = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); 
   instances.findLast(item => item.callback).callback('complete', {position: [5, 6]});
   await tick();
   assert.equal(run('locationPollPromise'), null, 'foreground recovery finishes');
-  const validation = source.slice(source.indexOf('function acceptLocation(result)'),
-    source.indexOf('  const point = [lon, lat];', source.indexOf('function acceptLocation(result)')));
-  vm.runInContext(`${validation}\n return true; }`, context);
-  run('lastLocationSourceTimestamp = 0');
-  assert.equal(run('acceptLocation({position:[116,40], timestamp:Date.now()-60000})'), false);
-  run('const fixTime = Date.now()');
-  assert.equal(run('acceptLocation({position:[116,40], timestamp:fixTime})'), true);
-  assert.equal(run('acceptLocation({position:[116,40], timestamp:fixTime})'), false);
+  run('currentCoord = null; acceptLocation = () => { locationFixSerial++; return true; }');
+  const initial = run('locate()');
+  await tick();
+  instances.findLast(item => item.callback).callback('complete', {position: [116, 40]});
+  assert.equal(run('currentCoord'), null, 'raw coordinates do not become map coordinates');
+  assert.equal(run('typeof pendingLocationRender'), 'function');
+  run('currentCoord = [116.006, 40.001]; pendingLocationRender()');
+  assert.equal((await initial)[0], 116.006, 'initial locate waits for conversion');
   console.log('PASS: single flight, hard timeout, late callback, watch replacement, foreground recovery');
 })().catch(error => { console.error(error); process.exitCode = 1; });
