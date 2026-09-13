@@ -472,12 +472,10 @@ window.setInterval(() => {
   if (locationPermissionBlocked) return;
   updateLocationHealth();
   if (Date.now() < locationRetryAt || locationPollPromise) return;
-  if (Date.now()-Math.max(lastWatchFixAt, lastWatchStartedAt) >= 60000) {
+  if (Date.now()-Math.max(lastWatchFixAt, lastWatchStartedAt) >= 30000) {
+    recordLocationEvent('watch-restart', {state: 'stale'});
     stopPositionWatch();
     startPositionWatch();
-  }
-  if (!lastLocationFixAt || Date.now()-lastLocationFixAt > 10000) {
-    locate().catch(error => recordLocationEvent('recovery-error', {message: error.message}));
   }
 }, 1000);
 
@@ -486,8 +484,6 @@ async function resumePosition() {
   recordLocationEvent('resume');
   if (locationPollPromise) return;
   startPositionWatch();
-  if (Date.now() < locationRetryAt || lastLocationFixAt && Date.now()-lastLocationFixAt < 10000) return;
-  locate().catch(error => recordLocationEvent('resume-error', {message: error.message}));
 }
 document.addEventListener('visibilitychange', () => {
   recordLocationEvent('visibility');
