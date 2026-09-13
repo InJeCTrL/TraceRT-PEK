@@ -283,12 +283,38 @@ const locationFilter = new LocationFilter({
 });
 window.getLocationStats = () => ({...locationFilter.stats});
 
+let officialConversionPending = false;
 function acceptLocation(result) {
-  if (result.location_type === 'ip' || result.isConverted === false) {
-    recordLocationEvent('location-rejected');
+  if (['ip', 'ipcity'].includes(result.location_type)) {
+    recordLocationEvent('location-rejected', {state: 'ip'});
     return false;
   }
   const position = result.position;
+  if (result.isConverted === false || result.isConverted === 0) {
+    recordLocationEvent('location-rejected', {state: 'unconverted'});
+    if (officialConversionPending) return true;
+    officialConversionPending = true;
+    let settled = false;
+    const finish = (error, converted) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      officialConversionPending = false;
+      if (error) {
+        recordLocationEvent('official-conversion-error');
+        pendingLocationRender?.(error);
+        return;
+      }
+      acceptLocation({...result, position: converted, isConverted: true});
+    };
+    const timer = window.setTimeout(() => finish(new Error('高德定位坐标转换超时')), 8000);
+    try {
+      AMap.convertFrom([position?.lng ?? position?.getLng?.(), position?.lat ?? position?.getLat?.()], 'gps', (status, data) => {
+        finish(status === 'complete' && data?.locations?.[0] ? null : new Error('高德定位坐标转换失败'), data?.locations?.[0]);
+      });
+    } catch (error) { finish(error); }
+    return true;
+  }
   return locationFilter.submit({timestamp: result.timestamp ?? Date.now(), coords: {
     longitude: position?.lng ?? position?.getLng?.(),
     latitude: position?.lat ?? position?.getLat?.(),

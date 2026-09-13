@@ -10,6 +10,5 @@ assert.equal(vm.runInContext("acceptLocation({position:{lng:116,lat:40},isConver
 assert.equal(received.coords.longitude, 116);
 assert.equal(received.coords.latitude, 40);
 assert.equal(vm.runInContext("acceptLocation({location_type:'ip'})", context), false);
-assert.equal(vm.runInContext("acceptLocation({isConverted:false})", context), false);
-assert.ok(!source.includes('AMap.convertFrom('), 'no duplicate online conversion');
+assert.ok(source.includes('result.isConverted === false'), 'unconverted results use explicit fallback');
 console.log('PASS: official GCJ-02 input, IP and unconverted rejection');
