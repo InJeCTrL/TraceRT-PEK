@@ -1,6 +1,7 @@
 class LocationFilter {
   constructor({convert, distance, onFix, onPosition, onEvent = () => {}, onError = () => {},
-    now = Date.now, schedule = setTimeout, cancel = clearTimeout, canRun = () => true}) {
+    now = Date.now, schedule = (fn, ms) => setTimeout(fn, ms),
+    cancel = timer => clearTimeout(timer), canRun = () => true}) {
     Object.assign(this, {convert, distance, onFix, onPosition, onEvent, onError, now, schedule, cancel, canRun});
     this.latest = null;
     this.converted = null;

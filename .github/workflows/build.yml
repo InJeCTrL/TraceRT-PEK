@@ -34,6 +34,7 @@ jobs:
           node --check web/admin.js
           node tests/location-recovery.cjs
           node tests/location-filter.cjs
+          node tests/location-timer-binding.cjs
       - name: Validate Compose with dummy credentials
         env:
           AMAP_API_KEY: ci-placeholder
