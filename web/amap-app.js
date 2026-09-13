@@ -257,69 +257,16 @@ function updateJunctionZoom() {
   }
 }
 
-const locationFilter = new LocationFilter({
-  distance: distanceMeters,
-  canRun: () => !document.hidden,
-  // Geolocation(convert:true) already supplies GCJ-02; never convert it twice.
-  convert: (point, done) => done(null, point),
-  onFix: sample => {
-    lastLocationSourceTimestamp = sample.timestamp;
-    lastLocationFixAt = Math.min(Date.now(), sample.timestamp);
-    locationFixSerial++;
-    recordLocationEvent('fix', {sourceTimestamp: sample.timestamp, accuracy: sample.accuracy, source: 'amap'});
-    updateLocationHealth();
-  },
-  onPosition: (sample, point) => {
-    locationConversionError = false;
-    renderLocation({position: point, heading: sample.heading});
-    pendingLocationRender?.();
-  },
-  onEvent: recordLocationEvent,
-  onError: error => {
-    locationConversionError = true;
-    updateLocationHealth();
-    pendingLocationRender?.(error);
-  },
-});
-window.getLocationStats = () => ({...locationFilter.stats});
+window.getLocationStats = () => ({received: locationFixSerial});
 
-let officialConversionPending = false;
 function acceptLocation(result) {
-  if (['ip', 'ipcity'].includes(result.location_type)) {
-    recordLocationEvent('location-rejected', {state: 'ip'});
-    return false;
-  }
   const position = result.position;
-  if (result.isConverted === false || result.isConverted === 0) {
-    recordLocationEvent('location-rejected', {state: 'unconverted'});
-    if (officialConversionPending) return true;
-    officialConversionPending = true;
-    let settled = false;
-    const finish = (error, converted) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timer);
-      officialConversionPending = false;
-      if (error) {
-        recordLocationEvent('official-conversion-error');
-        pendingLocationRender?.(error);
-        return;
-      }
-      acceptLocation({...result, position: converted, isConverted: true});
-    };
-    const timer = window.setTimeout(() => finish(new Error('高德定位坐标转换超时')), 8000);
-    try {
-      AMap.convertFrom([position?.lng ?? position?.getLng?.(), position?.lat ?? position?.getLat?.()], 'gps', (status, data) => {
-        finish(status === 'complete' && data?.locations?.[0] ? null : new Error('高德定位坐标转换失败'), data?.locations?.[0]);
-      });
-    } catch (error) { finish(error); }
-    return true;
-  }
-  return locationFilter.submit({timestamp: result.timestamp ?? Date.now(), coords: {
-    longitude: position?.lng ?? position?.getLng?.(),
-    latitude: position?.lat ?? position?.getLat?.(),
-    accuracy: result.accuracy, heading: result.heading,
-  }});
+  lastLocationSourceTimestamp = result.timestamp ?? Date.now();
+  lastLocationFixAt = Date.now();
+  locationFixSerial++;
+  recordLocationEvent('fix', {accuracy: result.accuracy, sourceTimestamp: lastLocationSourceTimestamp});
+  renderLocation({position: [position.lng ?? position.getLng(), position.lat ?? position.getLat()], heading: result.heading});
+  return true;
 }
 
 function renderLocation(result) {
@@ -544,12 +491,12 @@ async function resumePosition() {
 }
 document.addEventListener('visibilitychange', () => {
   recordLocationEvent('visibility');
-  if (document.hidden) { stopPositionWatch(); cancelLocationPoll?.(); locationFilter.suspend(); }
+  if (document.hidden) { stopPositionWatch(); cancelLocationPoll?.(); }
   else resumePosition();
 });
 window.addEventListener('pageshow', resumePosition);
 window.addEventListener('online', resumePosition);
-window.addEventListener('pagehide', () => { stopPositionWatch(); cancelLocationPoll?.(); locationFilter.suspend(); });
+window.addEventListener('pagehide', () => { stopPositionWatch(); cancelLocationPoll?.(); });
 
 function useCurrent(mode) {
   (currentCoord ? Promise.resolve(currentCoord) : locate())
