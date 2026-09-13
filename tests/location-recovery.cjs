@@ -23,6 +23,14 @@ const context = vm.createContext({
     clearTimeout(id) { timers.delete(id); }, setInterval() {}, addEventListener() {},
   },
   navigator: {geolocation},
+  AMap: {plugin(name, callback) { callback(); }, Geolocation: class {
+    constructor(options) { assert.equal(options.convert, true); assert.equal(options.noIpLocate, 3); this.events = {}; }
+    getCurrentPosition(callback) { geolocation.getCurrentPosition(r => callback('complete', r), e => callback('error', e)); }
+    on(name, callback) { this.events[name] = callback; }
+    off(name) { delete this.events[name]; }
+    watchPosition() { return geolocation.watchPosition(r => this.events.complete?.(r)); }
+    clearWatch(id) { geolocation.clearWatch(id); }
+  }},
 });
 vm.runInContext(`
   let geolocationReady, amapGeolocation, amapPollGeolocation, locationPollPromise;

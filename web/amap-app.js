@@ -260,19 +260,13 @@ function updateJunctionZoom() {
 const locationFilter = new LocationFilter({
   distance: distanceMeters,
   canRun: () => !document.hidden,
-  convert: (point, done) => AMap.convertFrom(point, 'gps', (status, result) => {
-    const converted = result?.locations?.[0];
-    if (status !== 'complete' || !converted) {
-      done(new Error(result?.info || '坐标转换失败'));
-      return;
-    }
-    done(null, [Number(converted.lng ?? converted.getLng?.()), Number(converted.lat ?? converted.getLat?.())]);
-  }),
+  // Geolocation(convert:true) already supplies GCJ-02; never convert it twice.
+  convert: (point, done) => done(null, point),
   onFix: sample => {
     lastLocationSourceTimestamp = sample.timestamp;
     lastLocationFixAt = Math.min(Date.now(), sample.timestamp);
     locationFixSerial++;
-    recordLocationEvent('fix', {sourceTimestamp: sample.timestamp, accuracy: sample.accuracy, source: 'browser'});
+    recordLocationEvent('fix', {sourceTimestamp: sample.timestamp, accuracy: sample.accuracy, source: 'amap'});
     updateLocationHealth();
   },
   onPosition: (sample, point) => {
@@ -290,7 +284,16 @@ const locationFilter = new LocationFilter({
 window.getLocationStats = () => ({...locationFilter.stats});
 
 function acceptLocation(result) {
-  return locationFilter.submit(result);
+  if (result.location_type === 'ip' || result.isConverted === false) {
+    recordLocationEvent('location-rejected');
+    return false;
+  }
+  const position = result.position;
+  return locationFilter.submit({timestamp: result.timestamp ?? Date.now(), coords: {
+    longitude: position?.lng ?? position?.getLng?.(),
+    latitude: position?.lat ?? position?.getLat?.(),
+    accuracy: result.accuracy, heading: result.heading,
+  }});
 }
 
 function renderLocation(result) {
@@ -329,18 +332,10 @@ function renderLocation(result) {
 }
 
 function createGeolocation() {
-  if (!navigator.geolocation) throw new Error('浏览器不支持定位，请使用 HTTPS 并允许定位');
-  const options = {enableHighAccuracy: true, maximumAge: 0, timeout: 10000};
-  const events = {};
-  return {
-    getCurrentPosition: callback => navigator.geolocation.getCurrentPosition(
-      result => callback('complete', result), error => callback('error', error), options),
-    on: (name, handler) => { events[name] = handler; },
-    off: name => { delete events[name]; },
-    watchPosition: () => navigator.geolocation.watchPosition(
-      result => events.complete?.(result), error => events.error?.(error), options),
-    clearWatch: id => navigator.geolocation.clearWatch(id),
-  };
+  return new AMap.Geolocation({enableHighAccuracy: true, maximumAge: 0, timeout: 10000,
+    convert: true, noIpLocate: 3, GeoLocationFirst: true, useNative: false,
+    showButton: false, showMarker: false, showCircle: false,
+    panToLocation: false, zoomToAccuracy: false});
 }
 
 let locationPermissionBlocked = false;
@@ -355,7 +350,8 @@ function locationSucceeded() {
 }
 
 function locationFailed(error) {
-  if (error?.code === 1) {
+  const denied = error?.code === 1 || /permission denied|user denied|用户拒绝/i.test(error?.message || '');
+  if (denied) {
     locationPermissionBlocked = true;
     locationAuthorized = false;
     stopPositionWatch();
@@ -384,8 +380,13 @@ navigator.permissions?.query({name: 'geolocation'}).then(permission => {
 
 function ensureGeolocation() {
   if (geolocationReady) return geolocationReady;
-  geolocationReady = Promise.resolve().then(() => {
-    amapPollGeolocation = createGeolocation();
+  geolocationReady = new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error('高德定位插件加载超时')), 15000);
+    AMap.plugin('AMap.Geolocation', () => {
+      window.clearTimeout(timer);
+      try { amapPollGeolocation = createGeolocation(); resolve(); }
+      catch (error) { reject(error); }
+    });
   }).catch(error => { geolocationReady = null; throw error; });
   return geolocationReady;
 }
@@ -423,7 +424,7 @@ async function locate() {
         locationSucceeded();
         startPositionWatch();
         try {
-          const sourceTimestamp = Number(result.timestamp ?? result.coords?.timestamp);
+          const sourceTimestamp = Number(result.timestamp ?? Date.now());
           const newerThanWatch = Number.isFinite(sourceTimestamp) && sourceTimestamp > lastLocationSourceTimestamp;
           const accepted = (locationFixSerial === serialAtStart || newerThanWatch) && acceptLocation(result);
           if (accepted || locationFixSerial > serialAtStart) {
