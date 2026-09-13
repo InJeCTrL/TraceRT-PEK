@@ -929,6 +929,38 @@ def log_error(payload,error):
         output.write(json.dumps({'time':datetime.now().astimezone().isoformat(timespec='seconds'),'payload':payload,'error':str(error)},ensure_ascii=False)+'\n')
 
 
+def diagnostic_schema(connection):
+    connection.execute('CREATE TABLE IF NOT EXISTS location_diagnostics (id TEXT PRIMARY KEY, received REAL, payload TEXT)')
+    connection.execute('DELETE FROM location_diagnostics WHERE received < ?', (time.time()-7*86400,))
+
+
+def save_location_diagnostics(payload):
+    session = payload['session']
+    device = payload['device']
+    if not all(isinstance(v, str) and re.fullmatch(r'[a-zA-Z0-9-]{8,64}', v) for v in (session, device)):
+        raise ValueError('invalid id')
+    events = payload['events']
+    if not isinstance(events, list) or len(events) > 60: raise ValueError('invalid events')
+    # Strict allowlist: never persist arbitrary messages, coordinates or URLs.
+    allowed = {'time', 'type', 'visibility', 'code', 'state', 'elapsed_ms', 'accuracy', 'sourceTimestamp'}
+    clean = []
+    for event in events:
+        if not isinstance(event, dict): raise ValueError('invalid event')
+        clean.append({k: v for k, v in event.items() if k in allowed and
+                      (isinstance(v, (int, float)) or isinstance(v, str) and len(v) <= 80)})
+    with DB_LOCK, db() as connection:
+        diagnostic_schema(connection)
+        previous = connection.execute('SELECT received,payload FROM location_diagnostics WHERE id=?', (session,)).fetchone()
+        if previous and time.time()-previous[0] < 5: return {'retry': True}
+        old = json.loads(previous[1])['events'] if previous else []
+        record = {'session': session, 'device': device, 'browser': str(payload.get('browser', ''))[:240],
+                  'received': datetime.now().astimezone().isoformat(), 'events': (old+clean)[-300:]}
+        connection.execute('INSERT OR REPLACE INTO location_diagnostics VALUES (?,?,?)',
+                           (session, time.time(), json.dumps(record, ensure_ascii=False)))
+        connection.execute('DELETE FROM location_diagnostics WHERE id NOT IN (SELECT id FROM location_diagnostics ORDER BY received DESC LIMIT 2000)')
+    return {'ok': True}
+
+
 class Handler(SimpleHTTPRequestHandler):
     def send_json(self,value,status=200):
         body=json.dumps(value,ensure_ascii=False).encode(); self.send_response(status)
@@ -949,6 +981,11 @@ class Handler(SimpleHTTPRequestHandler):
         parsed=urllib.parse.urlparse(self.path)
         if parsed.path.startswith('/api/admin/'):
             if not self.require_admin(): return
+            if parsed.path == '/api/admin/location-diagnostics':
+                with DB_LOCK, db() as connection:
+                    diagnostic_schema(connection)
+                    rows = connection.execute('SELECT payload FROM location_diagnostics ORDER BY received DESC LIMIT 500').fetchall()
+                return self.send_json([json.loads(row[0]) for row in rows])
             if parsed.path=='/api/admin/navigation-records': return self.send_json(list_records(urllib.parse.parse_qs(parsed.query)))
             match=re.fullmatch(r'/api/admin/navigation-records/([A-Za-z0-9-]+)',parsed.path)
             if match:
@@ -984,6 +1021,14 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header('Content-Length',str(len(content))); self.end_headers(); self.wfile.write(content)
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
+        if path == '/api/location-diagnostics':
+            try:
+                size = int(self.headers.get('Content-Length', '0'))
+                if not 0 < size <= 32768: return self.send_json({'error': 'payload size'}, 413)
+                payload = json.loads(self.rfile.read(size))
+                return self.send_json(save_location_diagnostics(payload))
+            except (ValueError, TypeError, KeyError):
+                return self.send_json({'error': 'invalid diagnostics'}, 400)
         correction = re.fullmatch(r'/api/cameras/([0-9a-f-]+)/correction', path)
         if correction:
             try:

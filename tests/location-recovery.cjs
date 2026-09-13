@@ -33,6 +33,7 @@ vm.runInContext(`
   let currentCoord = null;
   let pendingLocationRender = null;
   const locationFilter = {suspend() {}};
+  const locationHealth = {};
   function recordLocationEvent() {}
   function updateLocationHealth() {}
   function acceptLocation(result) {
@@ -65,16 +66,19 @@ const tick = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); 
   const oldWatch = instances.at(-1);
   const oldCallback = oldWatch.events.complete;
   await run('startPositionWatch()');
+  assert.equal(oldWatch.cleared, undefined, 'duplicate starts preserve active watch');
+  run('stopPositionWatch()');
+  await run('startPositionWatch()');
   assert.equal(oldWatch.cleared, instances.indexOf(oldWatch)+1);
   const serial = run('locationFixSerial');
   oldCallback({position: [8, 9]});
   assert.equal(run('locationFixSerial'), serial, 'ignore obsolete watch');
   const pending = run('locate()');
-  const cancelled = assert.rejects(pending, /取消/);
   await tick();
   await run('resumePosition()');
-  await cancelled; await tick();
+  await tick();
   instances.findLast(item => item.callback).callback('complete', {position: [5, 6]});
+  await pending;
   await tick();
   assert.equal(run('locationPollPromise'), null, 'foreground recovery finishes');
   run('currentCoord = null; acceptLocation = () => { locationFixSerial++; return true; }');
@@ -85,5 +89,12 @@ const tick = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); 
   assert.equal(run('typeof pendingLocationRender'), 'function');
   run('currentCoord = [116.006, 40.001]; pendingLocationRender()');
   assert.equal((await initial)[0], 116.006, 'initial locate waits for conversion');
+  run('locationFailed({code: 1})');
+  const count = instances.length;
+  await assert.rejects(run('locate()'), /权限/);
+  await run('resumePosition()');
+  assert.equal(instances.length, count, 'denied permission stops requests');
+  run('locationPermissionBlocked = false; locationFailed({code: 3})');
+  assert.ok(run('locationRetryAt > Date.now()'), 'timeout schedules backoff');
   console.log('PASS: single flight, hard timeout, late callback, watch replacement, foreground recovery');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -17,6 +17,7 @@
 <body>
   <header class="topbar"><div class="brand"><b>算路记录后台</b><span>TraceRT-PEK 高德路线记录</span></div><div class="top-actions"><a class="button" href="/">返回路线规划</a><button class="button" id="refresh">刷新</button><button class="button danger" id="clear-all">清空记录</button></div></header>
   <main class="page">
+    <p><a class="button" href="/admin-diagnostics.html">定位诊断</a></p>
     <section class="summary"><div class="card"><b id="total-count">0</b><span>全部算路</span></div><div class="card success"><b id="success-count">0</b><span>成功</span></div><div class="card failed"><b id="failed-count">0</b><span>失败</span></div></section>
     <section class="toolbar"><input id="search" placeholder="搜索起点、终点、记录 ID、错误"><select id="status-filter"><option value="all">全部结果</option><option value="success">仅成功</option><option value="failed">仅失败</option></select><button class="button primary" id="apply-filter">查询</button></section>
     <section class="table-wrap"><table><thead><tr><th>时间</th><th>结果</th><th>起点 → 终点</th><th>路线类型</th><th>距离 / 时间</th><th>计算次数</th><th>算路耗时</th></tr></thead><tbody id="records"></tbody></table><div class="empty" id="empty" hidden>暂无算路记录</div></section>

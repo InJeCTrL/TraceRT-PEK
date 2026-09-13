@@ -64,6 +64,7 @@ function recordLocationEvent(type, details = {}) {
   locationDiagnostics.push({time: new Date().toISOString(), type,
     visibility: document.visibilityState, ...details});
   if (locationDiagnostics.length > 240) locationDiagnostics.shift();
+  window.uploadLocationDiagnostic?.(locationDiagnostics[locationDiagnostics.length-1]);
 }
 
 function updateLocationHealth() {
@@ -342,6 +343,45 @@ function createGeolocation() {
   };
 }
 
+let locationPermissionBlocked = false;
+let locationAuthorized = false;
+let locationRetryAt = 0;
+let locationFailures = 0;
+
+function locationSucceeded() {
+  locationAuthorized = true;
+  locationFailures = 0;
+  locationRetryAt = 0;
+}
+
+function locationFailed(error) {
+  if (error?.code === 1) {
+    locationPermissionBlocked = true;
+    locationAuthorized = false;
+    stopPositionWatch();
+    locationHealth.hidden = false;
+    locationHealth.textContent = '定位权限已被阻止，请在浏览器网站权限中重新允许定位';
+    recordLocationEvent('permission-blocked', {code: 1});
+  } else {
+    locationFailures = Math.min(locationFailures+1, 5);
+    locationRetryAt = Date.now()+Math.min(30000, 2000*2**(locationFailures-1));
+  }
+}
+
+navigator.permissions?.query({name: 'geolocation'}).then(permission => {
+  permission.addEventListener('change', () => {
+    recordLocationEvent('permission', {state: permission.state});
+    if (permission.state === 'denied') {
+      locationFailed({code: 1});
+      cancelLocationPoll?.();
+    } else {
+      locationPermissionBlocked = false;
+      locationRetryAt = 0;
+      if (permission.state === 'granted') resumePosition();
+    }
+  });
+}).catch(() => {});
+
 function ensureGeolocation() {
   if (geolocationReady) return geolocationReady;
   geolocationReady = Promise.resolve().then(() => {
@@ -351,6 +391,7 @@ function ensureGeolocation() {
 }
 
 async function locate() {
+  if (locationPermissionBlocked) throw new Error('定位权限已被阻止，请在浏览器网站权限中重新允许定位');
   await ensureGeolocation();
   if (locationPollPromise) return locationPollPromise;
   const serialAtStart = locationFixSerial;
@@ -363,7 +404,8 @@ async function locate() {
       window.clearTimeout(timer);
       if (pendingLocationRender === finish) pendingLocationRender = null;
       recordLocationEvent(error ? 'poll-error' : 'poll-complete', {
-        elapsedMs: Date.now()-started, message: error?.message ?? ''});
+        elapsed_ms: Date.now()-started, code: error?.code, message: error?.message ?? ''});
+      if (error) locationFailed(error);
       if (error) reject(error); else resolve(currentCoord);
     };
     const timer = window.setTimeout(() => {
@@ -375,9 +417,11 @@ async function locate() {
       amapPollGeolocation.getCurrentPosition((status, result) => {
         if (settled) return;
         if (status !== 'complete') {
-          finish(new Error(result?.message || result?.info || '无法获取当前位置'));
+          finish(Object.assign(new Error(result?.message || result?.info || '无法获取当前位置'), {code: result?.code}));
           return;
         }
+        locationSucceeded();
+        startPositionWatch();
         try {
           const sourceTimestamp = Number(result.timestamp ?? result.coords?.timestamp);
           const newerThanWatch = Number.isFinite(sourceTimestamp) && sourceTimestamp > lastLocationSourceTimestamp;
@@ -412,7 +456,7 @@ function stopPositionWatch() {
 }
 
 async function startPositionWatch() {
-  if (positionWatchStarting || document.hidden) return;
+  if (!locationAuthorized || locationPermissionBlocked || positionWatchId != null || positionWatchStarting || document.hidden) return;
   positionWatchStarting = true;
   lastWatchStartedAt = Date.now();
   try {
@@ -423,10 +467,14 @@ async function startPositionWatch() {
     const geolocation = amapGeolocation = createGeolocation();
     const complete = result => {
       if (generation !== positionWatchGeneration) return;
+      locationSucceeded();
       if (acceptLocation(result)) lastWatchFixAt = Date.now();
     };
     const error = result => {
+      if (generation !== positionWatchGeneration) return;
+      locationFailed(result);
       if (generation === positionWatchGeneration) recordLocationEvent('watch-error', {
+        code: result?.code,
         message: result?.message || result?.info || 'unknown'});
     };
     if (typeof geolocation.watchPosition !== 'function') {
@@ -447,19 +495,24 @@ async function startPositionWatch() {
 
 window.setInterval(() => {
   if (document.hidden) return;
+  if (locationPermissionBlocked) return;
   updateLocationHealth();
-  if (Date.now()-Math.max(lastWatchFixAt, lastWatchStartedAt) >= 30000) startPositionWatch();
-  if (!lastLocationFixAt || Date.now()-lastLocationFixAt > 1500) {
+  if (Date.now() < locationRetryAt || locationPollPromise) return;
+  if (Date.now()-Math.max(lastWatchFixAt, lastWatchStartedAt) >= 60000) {
+    stopPositionWatch();
+    startPositionWatch();
+  }
+  if (!lastLocationFixAt || Date.now()-lastLocationFixAt > 10000) {
     locate().catch(error => recordLocationEvent('recovery-error', {message: error.message}));
   }
 }, 1000);
 
 async function resumePosition() {
-  if (document.hidden) return;
+  if (document.hidden || locationPermissionBlocked) return;
   recordLocationEvent('resume');
-  cancelLocationPoll?.();
-  if (locationPollPromise) await locationPollPromise.catch(() => {});
+  if (locationPollPromise) return;
   startPositionWatch();
+  if (Date.now() < locationRetryAt || lastLocationFixAt && Date.now()-lastLocationFixAt < 10000) return;
   locate().catch(error => recordLocationEvent('resume-error', {message: error.message}));
 }
 document.addEventListener('visibilitychange', () => {
